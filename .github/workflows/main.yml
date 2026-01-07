@@ -1,0 +1,181 @@
+name: Build kernel (Clang + KernelSU Next)
+
+on:
+  workflow_dispatch:
+    inputs:
+      kernel_repo:
+        description: 'Git URL of the kernel source (full URL or git@... or https://github.com/owner/repo). Required.'
+        required: true
+        default: ''
+      kernel_ref:
+        description: 'Branch, tag or commit to checkout from kernel_repo'
+        required: true
+        default: 'main'
+      kernelsu_repo:
+        description: 'Git URL of KernelSU Next fork to integrate (optional). If empty, no integration.'
+        required: false
+        default: 'https://github.com/sekrit-twc/kernelsu-next'
+      kernelsu_ref:
+        description: 'Branch/tag/commit for kernelsu_repo'
+        required: false
+        default: 'main'
+      arch:
+        description: 'Target ARCH for kernel build (e.g. arm64, x86_64)'
+        required: true
+        default: 'arm64'
+      cross_compile:
+        description: 'Cross-compiler prefix (e.g. aarch64-linux-gnu-) or empty for native'
+        required: false
+        default: ''
+      clang_version:
+        description: 'Clang/LLD version to install (major) - fallback to system clang if not available'
+        required: false
+        default: '16'
+      defconfig:
+        description: 'Defconfig to use (path or name, relative to kernel source). Use "defconfig" for a file or "arch/.._defconfig"; set to empty to skip config step.'
+        required: false
+        default: ''
+      make_targets:
+        description: 'Make targets to build, comma-separated (e.g. Image, Image.gz, dtbs, modules).'
+        required: false
+        default: 'Image'
+      jobs:
+        description: 'Parallel jobs for make (-j).'
+        required: false
+        default: '8'
+      upload_artifacts:
+        description: 'Whether to upload build artifacts as workflow artifacts (true/false)'
+        required: false
+        default: 'true'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - name: Prepare environment
+        run: |
+          set -euo pipefail
+          echo "Inputs:"
+          echo "  kernel_repo=${{ github.event.inputs.kernel_repo }}"
+          echo "  kernel_ref=${{ github.event.inputs.kernel_ref }}"
+          echo "  kernelsu_repo=${{ github.event.inputs.kernelsu_repo }}"
+          echo "  kernelsu_ref=${{ github.event.inputs.kernelsu_ref }}"
+          echo "  arch=${{ github.event.inputs.arch }}"
+          echo "  cross_compile=${{ github.event.inputs.cross_compile }}"
+          echo "  clang_version=${{ github.event.inputs.clang_version }}"
+          echo "  defconfig=${{ github.event.inputs.defconfig }}"
+          echo "  make_targets=${{ github.event.inputs.make_targets }}"
+          echo "  jobs=${{ github.event.inputs.jobs }}"
+
+      - name: Install system packages (apt)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends git wget curl ca-certificates ccache build-essential bc flex bison libssl-dev libncurses-dev python3 python3-distutils rsync unzip
+          # Try to install specified clang/lld version, fallback to default clang if not available
+          CLANG_VER=${{ github.event.inputs.clang_version }}
+          if ! sudo apt-get install -y clang-${CLANG_VER} lld-${CLANG_VER}; then
+            echo "clang-${CLANG_VER} not available via apt, installing default clang + lld"
+            sudo apt-get install -y clang lld || true
+          fi
+
+      - name: Clone kernel source
+        run: |
+          set -euo pipefail
+          KERNEL_REPO='${{ github.event.inputs.kernel_repo }}'
+          KERNEL_REF='${{ github.event.inputs.kernel_ref }}'
+          echo "Cloning $KERNEL_REPO@$KERNEL_REF"
+          rm -rf kernel || true
+          git clone --depth 1 --branch "$KERNEL_REF" "$KERNEL_REPO" kernel
+
+      - name: Integrate KernelSU Next (optional)
+        if: ${{ github.event.inputs.kernelsu_repo != '' }}
+        run: |
+          set -euo pipefail
+          KS_REPO='${{ github.event.inputs.kernelsu_repo }}'
+          KS_REF='${{ github.event.inputs.kernelsu_ref }}'
+          echo "Integrating KernelSU from $KS_REPO@$KS_REF"
+          git clone --depth 1 --branch "$KS_REF" "$KS_REPO" kernelsu_tmp
+          # If the kernelsu repo contains an integration script, prefer that
+          if [ -f kernelsu_tmp/install.sh ]; then
+            echo "Running kernelsu install.sh (may require adjustment for your fork)"
+            bash kernelsu_tmp/install.sh kernel || true
+          else
+            echo "No install.sh found - overlaying repo contents onto kernel tree"
+            rsync -av --exclude='.git' kernelsu_tmp/ kernel/
+          fi
+          rm -rf kernelsu_tmp
+
+      - name: Configure and build (Clang)
+        run: |
+          set -euo pipefail
+          cd kernel
+          ARCH='${{ github.event.inputs.arch }}'
+          CROSS_COMPILE='${{ github.event.inputs.cross_compile }}'
+          CLANG_VER='${{ github.event.inputs.clang_version }}'
+          DEFCONFIG='${{ github.event.inputs.defconfig }}'
+          MAKE_TARGETS='${{ github.event.inputs.make_targets }}'
+          JOBS='${{ github.event.inputs.jobs }}'
+
+          export ARCH
+          export CROSS_COMPILE
+
+          # Use clang as the compiler and lld as the linker when available
+          export CC=clang
+          export LD=ld.lld
+          export AR=llvm-ar
+          export NM=llvm-nm
+          export OBJCOPY=llvm-objcopy
+          export OBJDUMP=llvm-objdump
+          export STRIP=llvm-strip
+          export LLVM=1
+
+          echo "Using CC=$(which clang 2>/dev/null || echo 'clang not found')"
+          echo "Using LD=$(which ld.lld 2>/dev/null || echo 'ld.lld not found')"
+
+          # If a defconfig was provided, try to use it
+          if [ -n "$DEFCONFIG" ]; then
+            echo "Applying defconfig: $DEFCONFIG"
+            if [ -f "$DEFCONFIG" ]; then
+              make O=out $DEFCONFIG
+            else
+              # assume Kconfig name (like defconfig or vendor_defconfig)
+              make O=out ${DEFCONFIG}
+            fi
+          fi
+
+          # Split targets by commas and build
+          IFS=',' read -r -a TARGETS_ARR <<< "$MAKE_TARGETS"
+          TARGETS="${TARGETS_ARR[*]}"
+          echo "Building targets: $TARGETS"
+
+          make -C . O=out -j${JOBS} ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE CC=$CC LLVM=$LLVM LD=$LD AR=$AR NM=$NM OBJCOPY=$OBJCOPY OBJDUMP=$OBJDUMP STRIP=$STRIP $TARGETS
+
+      - name: Collect artifacts
+        if: ${{ github.event.inputs.upload_artifacts == 'true' }}
+        run: |
+          set -euo pipefail
+          mkdir -p artifacts
+          # Copy common outputs (adjust per arch/build)
+          cp -a kernel/out/arch/${{ github.event.inputs.arch }}/boot/Image artifacts/ 2>/dev/null || true
+          cp -a kernel/out/arch/${{ github.event.inputs.arch }}/boot/Image.gz artifacts/ 2>/dev/null || true
+          cp -a kernel/out/arch/${{ github.event.inputs.arch }}/boot/dts artifacts/ 2>/dev/null || true
+          cp -a kernel/out/arch/${{ github.event.inputs.arch }}/boot/dtbs artifacts/ 2>/dev/null || true
+          cp -a kernel/out/arch/${{ github.event.inputs.arch }}/boot/vmlinux artifacts/ 2>/dev/null || true
+          cp -a kernel/out/arch/${{ github.event.inputs.arch }}/modules.builtin* artifacts/ 2>/dev/null || true
+          # Tar everything else from the output dir if present
+          if [ -d kernel/out ]; then
+            tar -czf artifacts/out.tar.gz -C kernel out || true
+          fi
+
+      - name: Upload artifacts
+        if: ${{ github.event.inputs.upload_artifacts == 'true' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: kernel-build-artifacts
+          path: artifacts/**
+
+      - name: Show finished
+        run: |
+          echo "Build finished. Artifacts uploaded as 'kernel-build-artifacts' if enabled."
