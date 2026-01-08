@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       kernel_repo:
-        description: 'Kernel source repository URL'
+        description: 'Kernel source repository (format: owner/repo)'
         required: true
         type: string
       kernel_branch:
@@ -58,12 +58,17 @@ jobs:
         remove-docker-images: 'true'
 
     - name: Checkout kernel source
-      uses: actions/checkout@v4
-      with:
-        repository: ${{ github.event.inputs.kernel_repo }}
-        ref: ${{ github.event.inputs.kernel_branch }}
-        path: kernel
-        submodules: recursive
+      run: |
+        echo "Cloning kernel source..."
+        git clone --depth=1 --single-branch --branch ${{ github.event.inputs.kernel_branch }} \
+          https://github.com/${{ github.event.inputs.kernel_repo }}.git kernel
+        
+        echo "Updating submodules..."
+        cd kernel
+        git submodule update --init --recursive --depth=1 || echo "No submodules or submodule update failed"
+        
+        echo "Kernel source ready:"
+        ls -la
 
     - name: Setup build environment
       run: |
@@ -71,8 +76,8 @@ jobs:
         sudo apt-get install -y \
           bc bison build-essential ccache curl flex \
           g++-multilib gcc-multilib git gnupg gperf \
-          imagemagick \
-          lib32z1-dev liblz4-tool \
+          imagemagick lib32ncurses5-dev lib32readline-dev \
+          lib32z1-dev liblz4-tool libncurses5 libncurses5-dev \
           libsdl1.2-dev libssl-dev libxml2 libxml2-utils \
           lzop pngcrush rsync schedtool squashfs-tools \
           xsltproc zip zlib1g-dev python3 python-is-python3 \
@@ -84,10 +89,8 @@ jobs:
         cd ~/toolchains
         
         if [ "${{ github.event.inputs.compiler }}" == "clang" ]; then
-          echo "Downloading AOSP Clang..."
-          wget https://android.googlesource.com/platform/prebuilts/clang/host/linux-x86/+archive/refs/heads/master/clang-r498229b.tar.gz -O clang.tar.gz
-          mkdir clang
-          tar -xzf clang.tar.gz -C clang
+          echo "Downloading Zyc Clang (lightweight)..."
+          git clone --depth=1 https://gitlab.com/ThankYouMario/android_prebuilts_clang-standalone.git clang
           echo "CLANG_PATH=~/toolchains/clang" >> $GITHUB_ENV
           
         elif [ "${{ github.event.inputs.compiler }}" == "proton-clang" ]; then
