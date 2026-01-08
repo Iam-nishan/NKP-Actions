@@ -108,19 +108,29 @@ jobs:
 
     - name: Integrate KernelSU Next
       if: ${{ github.event.inputs.enable_kernelsu == 'true' }}
+      continue-on-error: true
       run: |
         cd kernel
         echo "Integrating KernelSU Next..."
         
-        # Run KernelSU Next setup script
-        curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash - && echo "✓ KernelSU Next setup completed" || echo "⚠ Setup script had issues but continuing..."
+        # Run KernelSU Next setup script (force continue even if it fails)
+        set +e  # Disable exit on error
+        curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -
+        EXIT_CODE=$?
+        set -e  # Re-enable exit on error
+        
+        if [ $EXIT_CODE -eq 0 ]; then
+          echo "✓ KernelSU Next setup completed successfully"
+        else
+          echo "⚠ KernelSU setup exited with code $EXIT_CODE, but continuing anyway..."
+        fi
         
         # Show what was created
         echo "Checking kernel directory:"
         ls -la | grep -i kernel || true
         
-        echo "Checking for KernelSU modifications:"
-        grep -r "kernelsu\|KernelSU" Makefile Kconfig 2>/dev/null | head -5 || echo "No KernelSU references found in Makefile/Kconfig"
+        echo "Checking for KernelSU modifications in Makefile/Kconfig:"
+        grep -r "kernelsu\|KernelSU" Makefile Kconfig 2>/dev/null | head -5 || echo "No modifications found"
 
     - name: Configure kernel
       run: |
