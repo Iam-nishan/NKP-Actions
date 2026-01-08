@@ -113,17 +113,17 @@ jobs:
         echo "Integrating KernelSU Next..."
         
         # Remove existing KernelSU if present
-        if [ -d "KernelSU" ]; then
+        if [ -d "KernelSU" ] || [ -L "KernelSU" ]; then
           rm -rf KernelSU
         fi
         
         # Run KernelSU Next setup script
         curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -
         
-        # Verify integration
-        if [ -d "KernelSU" ]; then
+        # Verify integration (check for directory or symlink)
+        if [ -d "KernelSU" ] || [ -L "KernelSU" ]; then
           echo "✓ KernelSU Next integrated successfully"
-          ls -la KernelSU/
+          ls -la KernelSU/ 2>/dev/null || ls -la KernelSU
         else
           echo "✗ KernelSU integration failed"
           exit 1
