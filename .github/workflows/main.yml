@@ -119,6 +119,8 @@ jobs:
         cd kernel
         export ARCH=${{ github.event.inputs.arch }}
         export SUBARCH=${{ github.event.inputs.arch }}
+        export HOSTCC=gcc
+        export HOSTCXX=g++
         make O=out ${{ github.event.inputs.defconfig }}
 
     - name: Build kernel
@@ -129,6 +131,8 @@ jobs:
         export CC=clang
         export LLVM=1
         export LLVM_IAS=1
+        export HOSTCC=gcc
+        export HOSTCXX=g++
         make -j$(nproc) O=out
 
     - name: Upload artifacts
