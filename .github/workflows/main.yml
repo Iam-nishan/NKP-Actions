@@ -13,11 +13,11 @@ on:
         default: 'main'
         type: string
       device_codename:
-        description: 'Device codename (e.g., marble, raphael)'
+        description: 'Device codename'
         required: true
         type: string
       defconfig:
-        description: 'Defconfig name (e.g., vendor/marble_defconfig)'
+        description: 'Defconfig name'
         required: true
         type: string
       arch:
@@ -25,18 +25,13 @@ on:
         required: true
         default: 'arm64'
         type: choice
-        options:
-          - arm64
-          - arm
+        options: [arm64, arm]
       compiler:
         description: 'Compiler toolchain'
         required: true
         default: 'clang'
         type: choice
-        options:
-          - clang
-          - gcc
-          - proton-clang
+        options: [clang, gcc, proton-clang]
       enable_kernelsu:
         description: 'Integrate KernelSU Next'
         required: true
@@ -45,11 +40,10 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
-    
+    runs-on: ubuntu-22.04
+
     steps:
-    - name: Maximize build space
-      uses: easimon/maximize-build-space@master
+    - uses: easimon/maximize-build-space@master
       with:
         remove-dotnet: 'true'
         remove-android: 'true'
@@ -57,197 +51,82 @@ jobs:
         remove-codeql: 'true'
         remove-docker-images: 'true'
 
-    - name: Checkout kernel source
+    - name: Checkout kernel
       run: |
-        echo "Cloning kernel source..."
-        git clone --depth=1 --single-branch --branch ${{ github.event.inputs.kernel_branch }} \
-          https://github.com/${{ github.event.inputs.kernel_repo }}.git kernel
-        
-        echo "Updating submodules..."
+        git clone --depth=1 --branch ${{ github.event.inputs.kernel_branch }} \
+          https://github.com/${{ github.event.inputs.kernel_repo }} kernel
         cd kernel
-        git submodule update --init --recursive --depth=1 || echo "No submodules or submodule update failed"
-        
-        echo "Kernel source ready:"
-        ls -la
+        git submodule update --init --recursive --depth=1 || true
 
-    - name: Setup build environment
+    - name: Setup build dependencies
       run: |
-        sudo apt-get update
-        sudo apt-get install -y \
+        sudo apt update
+        sudo apt install -y \
           bc bison build-essential ccache curl flex \
           g++-multilib gcc-multilib git gnupg gperf \
-          imagemagick lib32readline-dev \
-          lib32z1-dev liblz4-tool \
-          libsdl1.2-dev libssl-dev libxml2 libxml2-utils \
-          lzop pngcrush rsync schedtool squashfs-tools \
-          xsltproc zip zlib1g-dev python3 python-is-python3 \
-          libelf-dev software-properties-common
-        
-        # Install Python 2 from deadsnakes PPA
-        sudo add-apt-repository ppa:deadsnakes/ppa -y
-        sudo apt-get update
-        sudo apt-get install -y python2.7 python2.7-dev
-        
-        # Create python2 symlink
-        sudo ln -sf /usr/bin/python2.7 /usr/bin/python2
-        
-        # Verify Python 2 is available
-        python2 --version
+          lib32readline-dev lib32z1-dev libelf-dev \
+          libssl-dev lzop rsync unzip zip zlib1g-dev \
+          llvm clang wget
 
-    - name: Setup compiler toolchain
+    - name: Build & install Python 2.7
+      run: |
+        cd /tmp
+        wget https://www.python.org/ftp/python/2.7.18/Python-2.7.18.tgz
+        tar -xf Python-2.7.18.tgz
+        cd Python-2.7.18
+        ./configure
+        make -j$(nproc)
+        sudo make altinstall
+        sudo ln -sf /usr/local/bin/python2.7 /usr/bin/python
+        python --version
+
+    - name: Setup toolchain
       run: |
         mkdir -p ~/toolchains
         cd ~/toolchains
-        
-        if [ "${{ github.event.inputs.compiler }}" == "clang" ]; then
-          echo "Downloading Zyc Clang (lightweight)..."
-          git clone --depth=1 https://gitlab.com/ThankYouMario/android_prebuilts_clang-standalone.git clang
-          echo "CLANG_PATH=~/toolchains/clang" >> $GITHUB_ENV
-          
-        elif [ "${{ github.event.inputs.compiler }}" == "proton-clang" ]; then
-          echo "Downloading Proton Clang..."
+        if [ "${{ github.event.inputs.compiler }}" = "clang" ]; then
+          git clone --depth=1 https://github.com/llvm/llvm-project clang
+          echo "CLANG_PATH=$HOME/toolchains/clang" >> $GITHUB_ENV
+        elif [ "${{ github.event.inputs.compiler }}" = "proton-clang" ]; then
           git clone --depth=1 https://github.com/kdrag0n/proton-clang clang
-          echo "CLANG_PATH=~/toolchains/clang" >> $GITHUB_ENV
-        
-        elif [ "${{ github.event.inputs.compiler }}" == "gcc" ]; then
-          echo "Downloading GCC toolchains..."
+          echo "CLANG_PATH=$HOME/toolchains/clang" >> $GITHUB_ENV
+        else
           git clone --depth=1 https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-android-4.9 gcc-aarch64
           git clone --depth=1 https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_arm_arm-linux-androideabi-4.9 gcc-arm
-          echo "GCC_AARCH64=~/toolchains/gcc-aarch64" >> $GITHUB_ENV
-          echo "GCC_ARM=~/toolchains/gcc-arm" >> $GITHUB_ENV
+          echo "GCC_AARCH64=$HOME/toolchains/gcc-aarch64" >> $GITHUB_ENV
+          echo "GCC_ARM=$HOME/toolchains/gcc-arm" >> $GITHUB_ENV
         fi
 
     - name: Integrate KernelSU Next
-      if: ${{ github.event.inputs.enable_kernelsu == 'true' }}
+      if: ${{ github.event.inputs.enable_kernelsu }}
       continue-on-error: true
       run: |
         cd kernel
-        echo "Integrating KernelSU Next..."
-        
-        # Run KernelSU Next setup script (force continue even if it fails)
-        set +e  # Disable exit on error
-        curl -LSs "https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh" | bash -
-        EXIT_CODE=$?
-        set -e  # Re-enable exit on error
-        
-        if [ $EXIT_CODE -eq 0 ]; then
-          echo "✓ KernelSU Next setup completed successfully"
-        else
-          echo "⚠ KernelSU setup exited with code $EXIT_CODE, but continuing anyway..."
-        fi
-        
-        # Show what was created
-        echo "Checking kernel directory:"
-        ls -la | grep -i kernel || true
-        
-        echo "Checking for KernelSU modifications in Makefile/Kconfig:"
-        grep -r "kernelsu\|KernelSU" Makefile Kconfig 2>/dev/null | head -5 || echo "No modifications found"
+        curl -LSs https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh | bash -
 
     - name: Configure kernel
       run: |
         cd kernel
         export ARCH=${{ github.event.inputs.arch }}
-        export SUBARCH=${{ github.event.inputs.arch }}
-        
-        if [ "${{ github.event.inputs.compiler }}" == "gcc" ]; then
+        export SUBARCH=$ARCH
+        if [ "${{ github.event.inputs.compiler }}" = "gcc" ]; then
           export CROSS_COMPILE=$GCC_AARCH64/bin/aarch64-linux-android-
           export CROSS_COMPILE_ARM32=$GCC_ARM/bin/arm-linux-androideabi-
         else
           export PATH=$CLANG_PATH/bin:$PATH
-          export CLANG_TRIPLE=aarch64-linux-gnu-
-          export CROSS_COMPILE=$CLANG_PATH/bin/llvm-
-          export CROSS_COMPILE_ARM32=$CLANG_PATH/bin/llvm-
           export CC=clang
+          export LLVM=1
+          export LLVM_IAS=1
         fi
-        
         make O=out ${{ github.event.inputs.defconfig }}
 
     - name: Build kernel
       run: |
         cd kernel
-        export ARCH=${{ github.event.inputs.arch }}
-        export SUBARCH=${{ github.event.inputs.arch }}
-        export LOCALVERSION="-KernelSU-Next"
-        
-        if [ "${{ github.event.inputs.compiler }}" == "gcc" ]; then
-          export CROSS_COMPILE=$GCC_AARCH64/bin/aarch64-linux-android-
-          export CROSS_COMPILE_ARM32=$GCC_ARM/bin/arm-linux-androideabi-
-          
-          make -j$(nproc --all) O=out \
-            ARCH=$ARCH \
-            CROSS_COMPILE=$CROSS_COMPILE \
-            CROSS_COMPILE_ARM32=$CROSS_COMPILE_ARM32
-        else
-          export PATH=$CLANG_PATH/bin:$PATH
-          export CLANG_TRIPLE=aarch64-linux-gnu-
-          export CROSS_COMPILE=$CLANG_PATH/bin/llvm-
-          export CROSS_COMPILE_ARM32=$CLANG_PATH/bin/llvm-
-          export CC=clang
-          export LLVM=1
-          export LLVM_IAS=1
-          
-          make -j$(nproc --all) O=out \
-            ARCH=$ARCH \
-            CC=clang \
-            CLANG_TRIPLE=$CLANG_TRIPLE \
-            CROSS_COMPILE=$CROSS_COMPILE \
-            CROSS_COMPILE_ARM32=$CROSS_COMPILE_ARM32 \
-            LLVM=1 \
-            LLVM_IAS=1
-        fi
+        make O=out -j$(nproc)
 
-    - name: Prepare artifacts
-      run: |
-        cd kernel
-        mkdir -p ../artifacts
-        
-        # Find and copy kernel image
-        if [ -f "out/arch/${{ github.event.inputs.arch }}/boot/Image.gz-dtb" ]; then
-          cp out/arch/${{ github.event.inputs.arch }}/boot/Image.gz-dtb ../artifacts/
-        elif [ -f "out/arch/${{ github.event.inputs.arch }}/boot/Image.gz" ]; then
-          cp out/arch/${{ github.event.inputs.arch }}/boot/Image.gz ../artifacts/
-        elif [ -f "out/arch/${{ github.event.inputs.arch }}/boot/Image" ]; then
-          cp out/arch/${{ github.event.inputs.arch }}/boot/Image ../artifacts/
-        fi
-        
-        # Copy dtb/dtbo if exists
-        if [ -f "out/arch/${{ github.event.inputs.arch }}/boot/dtb.img" ]; then
-          cp out/arch/${{ github.event.inputs.arch }}/boot/dtb.img ../artifacts/
-        fi
-        
-        if [ -f "out/arch/${{ github.event.inputs.arch }}/boot/dtbo.img" ]; then
-          cp out/arch/${{ github.event.inputs.arch }}/boot/dtbo.img ../artifacts/
-        fi
-        
-        # Create build info
-        echo "Device: ${{ github.event.inputs.device_codename }}" > ../artifacts/build_info.txt
-        echo "Compiler: ${{ github.event.inputs.compiler }}" >> ../artifacts/build_info.txt
-        echo "KernelSU Next: ${{ github.event.inputs.enable_kernelsu }}" >> ../artifacts/build_info.txt
-        echo "Build Date: $(date)" >> ../artifacts/build_info.txt
-
-    - name: Upload kernel artifacts
+    - name: Upload artifacts
       uses: actions/upload-artifact@v4
       with:
-        name: kernel-${{ github.event.inputs.device_codename }}-${{ github.run_number }}
-        path: artifacts/*
-        retention-days: 30
-
-    - name: Create Release
-      if: success()
-      uses: softprops/action-gh-release@v1
-      with:
-        tag_name: ${{ github.event.inputs.device_codename }}-${{ github.run_number }}
-        name: Kernel Build - ${{ github.event.inputs.device_codename }}
-        body: |
-          ## Custom Kernel with KernelSU Next
-          
-          **Device:** ${{ github.event.inputs.device_codename }}
-          **Compiler:** ${{ github.event.inputs.compiler }}
-          **KernelSU Next:** ${{ github.event.inputs.enable_kernelsu }}
-          **Build Date:** ${{ github.run_number }}
-          
-          ### Installation
-          Flash the kernel using your preferred method (TWRP, Fastboot, etc.)
-        files: artifacts/*
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        name: kernel-${{ github.event.inputs.device_codename }}
+        path: kernel/out/arch/**/boot/*
