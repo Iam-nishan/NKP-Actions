@@ -113,6 +113,7 @@ jobs:
       run: |
         cd kernel
         curl -LSs https://raw.githubusercontent.com/KernelSU-Next/KernelSU-Next/next/kernel/setup.sh | bash - || true
+        make mrproper
 
     - name: Configure kernel
       run: |
@@ -126,11 +127,7 @@ jobs:
     - name: Build kernel
       run: |
         cd kernel
-        export ARCH=${{ github.event.inputs.arch }}
-        export PATH=$CLANG_PATH/bin:$PATH
-        export CC=clang
-        export LLVM=1
-        export LLVM_IAS=1
+        export ARCH=${{ github.event.inputs.arch }}        
         export HOSTCC=gcc
         export HOSTCXX=g++
         make -j$(nproc) O=out
